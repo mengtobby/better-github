@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { AppError } from '../shared/errors.js';
 export interface RunOptions { readonly cwd?: string; readonly input?: string | Buffer; readonly env?: Readonly<Record<string, string>>; readonly maxBytes?: number; readonly truncateAt?: number; readonly timeoutMs?: number; readonly allowExitCodes?: readonly number[] }
 export interface RunResult { readonly stdout: Buffer; readonly stderr: string; readonly exitCode: number; readonly truncated: boolean }
@@ -13,7 +13,9 @@ export function childEnv(extra?: Readonly<Record<string, string>>): Record<strin
 export function createGitRunner(gitBin = 'git'): GitRunner {
   return { run(args, opts = {}) {
     return new Promise((resolve, reject) => {
-      const child = spawn(gitBin, [...args], { cwd: opts.cwd, env: childEnv(opts.env), windowsHide: true });
+      let child: ChildProcessWithoutNullStreams;
+      try { child = spawn(gitBin, [...args], { cwd: opts.cwd, env: childEnv(opts.env), windowsHide: true }); }
+      catch { reject(new AppError('INTERNAL', 'Git operation failed')); return; }
       const chunks: Buffer[] = [];
       let size = 0;
       let truncated = false;
@@ -22,7 +24,7 @@ export function createGitRunner(gitBin = 'git'): GitRunner {
       const timer = setTimeout(() => { failure = new AppError('INTERNAL', 'Git operation timed out'); child.kill(); }, opts.timeoutMs ?? 30_000);
       child.stdout.on('data', (chunk: Buffer) => {
         if (truncated || failure) return;
-        if (opts.truncateAt !== undefined && size + chunk.length >= opts.truncateAt) {
+        if (opts.truncateAt !== undefined && size + chunk.length > opts.truncateAt) {
           chunks.push(Buffer.from(chunk.subarray(0, Math.max(0, opts.truncateAt - size))));
           size = opts.truncateAt; truncated = true; child.kill(); return;
         }
