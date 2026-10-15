@@ -19,6 +19,9 @@ CREATE TABLE audit_events (id TEXT PRIMARY KEY, at TEXT NOT NULL,
  action TEXT NOT NULL, target TEXT, metadata TEXT NOT NULL);
 CREATE INDEX audit_target ON audit_events(target);
 CREATE INDEX audit_actor ON audit_events(actor_id);
+`, `
+ALTER TABLE tokens ADD COLUMN issued_by_token_id TEXT REFERENCES tokens(id) ON DELETE SET NULL;
+CREATE INDEX tokens_issued_by ON tokens(issued_by_token_id);
 `];
 
 export function migrate(db: Db): void {

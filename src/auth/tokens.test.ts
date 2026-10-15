@@ -159,3 +159,35 @@ describe('issuer boundaries', () => {
     expect(tokens.authenticate(agent.token)).toBeNull();
   });
 });
+
+describe('token lineage', () => {
+  it('allows narrower repository scopes while requiring explicit management scopes', () => {
+    const by = { ...issuer(), scopes: ['repo:admin', 'tokens:manage'] as const };
+    expect(tokens.issueUserToken(userId, { scopes: ['repo:read'] }, by).record.scopes).toEqual(['repo:read']);
+    expect(tokens.issueUserToken(userId, { scopes: ['repo:write'] }, by).record.scopes).toEqual(['repo:write']);
+    expect(tokens.issueUserToken(userId, { scopes: ['repo:read'] },
+      { ...by, scopes: ['repo:write', 'tokens:manage'] }).record.scopes).toEqual(['repo:read']);
+    for (const scopes of [['repo:write'], ['agents:manage']] as const) {
+      expect(() => tokens.issueUserToken(userId, { scopes }, { ...by, scopes: ['repo:read', 'tokens:manage'] }))
+        .toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+    }
+    expect(() => tokens.issueUserToken(userId, { scopes: [] }, { ...by, scopes: ['repo:admin'] }))
+      .toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+    expect(() => tokens.issueAgentToken(userId, agentId, { scopes: [] }, by))
+      .toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+  });
+  it('records issuers and revokes children and grandchildren without touching siblings', () => {
+    const parent = issuer();
+    const child = tokens.issueUserToken(userId, { scopes: ALL_SCOPES }, parent);
+    const grandchild = tokens.issueAgentToken(userId, agentId, { scopes: ['repo:read'] },
+      tokens.authenticate(child.token)!);
+    const unrelated = tokens.issueUserToken(userId, { scopes: [] }, null);
+    expect(child.record.issuedByTokenId).toBe(parent.tokenId);
+    expect(grandchild.record.issuedByTokenId).toBe(child.record.id);
+    expect(unrelated.record.issuedByTokenId).toBeNull();
+    tokens.revoke(parent.tokenId, parent);
+    expect(tokens.authenticate(child.token)).toBeNull();
+    expect(tokens.authenticate(grandchild.token)).toBeNull();
+    expect(tokens.authenticate(unrelated.token)).not.toBeNull();
+  });
+});

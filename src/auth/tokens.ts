@@ -44,14 +44,16 @@ export function createTokenService(store: Store, clock: Clock = systemClock): To
     }
     const token = `bgh_${type === 'user' ? 'u' : 'a'}_${randomBytes(32).toString('base64url')}`;
     const record = store.tokens.create({ ...opts, tokenHash: digest(token), principalType: type,
-      principalId: id, expiresAt: new Date(Math.min(clock().getTime() + ttlMs,
+      principalId: id, issuedByTokenId: issuedBy?.tokenId ?? null, expiresAt: new Date(Math.min(clock().getTime() + ttlMs,
         issuedBy === null ? Infinity : Date.parse(issuedBy.expiresAt))).toISOString() });
     return Object.freeze({ token, record });
   }
   function assertIssuer(userId: string, input: IssueOptions, by: Principal, scope: Scope): void {
     const opts = parseInput(optionsSchema, input);
     if (by.type !== 'user' || by.id !== userId || !by.scopes.includes(scope)
-      || opts.scopes.some((requested) => !by.scopes.includes(requested))) throw forbidden();
+      || opts.scopes.some((requested) => !by.scopes.includes(requested)
+        && !(requested === 'repo:read' && by.scopes.includes('repo:write'))
+        && !((requested === 'repo:read' || requested === 'repo:write') && by.scopes.includes('repo:admin')))) throw forbidden();
     const allowedRepos = by.repoIds;
     if (allowedRepos !== null && ((opts.repoIds === null || opts.repoIds === undefined)
       || opts.repoIds.some((id) => !allowedRepos.includes(id)))) throw forbidden();
@@ -97,7 +99,10 @@ export function createTokenService(store: Store, clock: Clock = systemClock): To
         : store.agents.findById(token.principalId)?.sponsorUserId;
       if (by.tokenId !== tokenId
         && (by.type !== 'user' || by.id !== ownerId || !by.scopes.includes('tokens:manage'))) throw forbidden();
-      store.tokens.revoke(tokenId);
+      store.transaction(() => {
+        store.tokens.revoke(tokenId);
+        store.tokens.revokeDescendants(tokenId);
+      });
     },
   });
 }
