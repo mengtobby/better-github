@@ -1,7 +1,24 @@
 import { fixedClock } from '../shared/clock.js';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
+import { defaultLogger } from '../shared/http.js';
 import { fixture } from '../../test/helpers.js';
 import { createApp } from './app.js';
+it('uses the shared default logger for route cleanup and unhandled errors', async () => {
+  const f = await fixture(), log = vi.spyOn(defaultLogger, 'error').mockImplementation(() => {});
+  try {
+    const token = await f.signup();
+    await f.request('/api/v1/repos', 'POST', { name: 'demo' }, token);
+    const app = createApp({ ...f, logger: undefined, storage: { ...f.storage,
+      remove: async () => { throw new Error('cleanup failed'); },
+      create: async () => { throw new Error('create failed'); },
+    } });
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    expect((await app.request('/api/v1/repos/alice/demo', { method: 'DELETE', headers })).status).toBe(200);
+    expect(log).toHaveBeenCalledWith('Repository storage removal failed', expect.objectContaining({ repoId: expect.any(String) }));
+    expect((await app.request('/api/v1/repos', { method: 'POST', headers, body: JSON.stringify({ name: 'failed' }) })).status).toBe(500);
+    expect(log).toHaveBeenCalledWith('unhandled error', expect.objectContaining({ error: 'create failed' }));
+  } finally { log.mockRestore(); await f.close(); }
+});
 it('serves health, envelopes errors and enforces stricter authentication limits', async () => {
   const f = await fixture();
   try {

@@ -35,3 +35,16 @@ it('uses SQL pagination for unrestricted callers and filters restricted tokens',
     }
   } finally { await f.close(); }
 });
+
+it('keeps creation order and pagination identical for restricted listings', async () => {
+  const f = await fixture();
+  try {
+    const token = await f.signup(), owner = f.store.users.findByHandle('alice')!;
+    const repos = ['zebra', 'alpha', 'middle'].map(name => f.store.repositories.create({ ownerId: owner.id, name }));
+    const restricted = f.tokens.issueUserToken(owner.id, { scopes: ['repo:read'], repoIds: repos.map(repo => repo.id).reverse() }, null).token;
+    for (const query of ['', '?page=2&limit=1']) {
+      const full = await (await f.request(`/api/v1/users/alice/repos${query}`, 'GET', undefined, token)).json();
+      expect(await (await f.request(`/api/v1/users/alice/repos${query}`, 'GET', undefined, restricted)).json()).toEqual(full);
+    }
+  } finally { await f.close(); }
+});
