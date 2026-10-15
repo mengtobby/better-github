@@ -9,6 +9,7 @@ import type { Scm } from '../scm/scm.js';
 import type { Clock } from '../shared/clock.js';
 import type { ErrorLogger } from '../shared/http.js';
 import { createErrorHandler } from '../shared/http.js';
+import { isAppError } from '../shared/errors.js';
 import { ok, fail } from '../shared/envelope.js';
 import { createRateLimit } from './rate-limit.js';
 import { createUserRoutes } from './routes/users.js';
@@ -26,8 +27,19 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   app.onError(createErrorHandler(deps.logger));
   app.notFound(c => c.json(fail('NOT_FOUND', 'Not found'), 404));
-  app.use('*', createRateLimit(deps.config.rateLimitPerMinute, deps.clock));
-  app.use('*', authMiddleware(deps.tokens));
+  const authenticate = authMiddleware(deps.tokens);
+  const invalidCredentials = createRateLimit(deps.config.authRateLimitPerMinute, deps.clock);
+  app.use('*', async (c, next) => {
+    // Run authentication alone so route-level 401s never consume this budget.
+    try { await authenticate(c, async () => {}); }
+    catch (error) {
+      if (c.req.header('Authorization') !== undefined && isAppError(error) && error.code === 'UNAUTHORIZED') {
+        return invalidCredentials(c, async () => { throw error; });
+      }
+      throw error;
+    }
+    await next();
+  });
   app.use('*', createRateLimit(deps.config.rateLimitPerMinute, deps.clock));
   const strict = createRateLimit(deps.config.authRateLimitPerMinute, deps.clock);
   app.use('*', async (c, next) => {
