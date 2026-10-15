@@ -1,11 +1,11 @@
 import { isUtf8 } from 'node:buffer';
 import { z } from 'zod';
 import { parseInput } from '../shared/http.js';
-import { notFound } from '../shared/errors.js';
+import { AppError, notFound } from '../shared/errors.js';
 import { createGitRunner } from './runner.js';
 import type { GitRunner } from './runner.js';
 import { assertRepo, assertSafePath, assertSafeRef } from './validate.js';
-import { parsePatch, parseRaw } from './diff-parse.js';
+import { matchPatches, parseRaw } from './diff-parse.js';
 import { parseBlame } from './blame-parse.js';
 import { mergeRepo } from './merge.js';
 import type { Ref, TreeEntry, Blob, Commit, Diff, BlameRange, MergeInput, MergeResult } from './types.js';
@@ -16,7 +16,7 @@ export interface Scm {
   readBlob(repo: string, ref: string, path: string, opts?: { maxBytes?: number }): Promise<Blob>;
   log(repo: string, ref: string, opts?: { path?: string; limit?: number; skip?: number }): Promise<readonly Commit[]>;
   getCommit(repo: string, sha: string): Promise<Commit>;
-  diff(repo: string, base: string, head: string, opts?: { maxFiles?: number; threeDot?: boolean }): Promise<Diff>;
+  diff(repo: string, base: string, head: string, opts?: { maxFiles?: number; maxLines?: number; maxPatchBytes?: number; threeDot?: boolean }): Promise<Diff>;
   blame(repo: string, ref: string, path: string): Promise<readonly BlameRange[]>;
   mergeBase(repo: string, a: string, b: string): Promise<string | null>;
   merge(repo: string, input: MergeInput): Promise<MergeResult>;
@@ -30,6 +30,14 @@ function commits(text: string): readonly Commit[] {
 }
 function count(value: number | undefined, fallback: number): number {
   return parseInput(z.number().int().nonnegative(), value ?? fallback);
+}
+function textPrefix(data: Buffer, partial: boolean): Buffer {
+  if (!partial || isUtf8(data)) return data;
+  let start = data.length - 1;
+  while (start >= 0 && data.length - start <= 3 && (data[start]! & 0xc0) === 0x80) start--;
+  const lead = data[start] ?? 0;
+  const width = lead >= 0xc2 && lead <= 0xdf ? 2 : lead >= 0xe0 && lead <= 0xef ? 3 : lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
+  return width > data.length - start ? data.subarray(0, start) : data;
 }
 export function createScm(runner: GitRunner = createGitRunner()): Scm {
   const run = (repo: string, args: readonly string[]) => { assertRepo(repo); return runner.run(args, { cwd: repo }); };
@@ -68,8 +76,10 @@ export function createScm(runner: GitRunner = createGitRunner()): Scm {
       const maxBytes = count(opts.maxBytes, 1024 * 1024), obj = await object(repo, ref, path);
       if ((await run(repo, ['cat-file', '-t', obj.sha])).stdout.toString().trim() !== 'blob') throw notFound('Blob');
       const size = Number((await run(repo, ['cat-file', '-s', obj.sha])).stdout.toString());
-      const data = (await runner.run(['cat-file', 'blob', obj.sha], { cwd: repo, maxBytes: size })).stdout;
-      const encoding = isUtf8(data) && !data.includes(0) ? 'utf8' : 'base64';
+      if (!Number.isSafeInteger(size) || size < 0) throw new AppError('INTERNAL', 'Invalid blob size');
+      const data = (await runner.run(['cat-file', 'blob', obj.sha], { cwd: repo, truncateAt: maxBytes + 1 })).stdout;
+      const prefix = textPrefix(data, size > data.length);
+      const encoding = isUtf8(prefix) && !data.includes(0) ? 'utf8' : 'base64';
       let content = data.subarray(0, maxBytes);
       if (encoding === 'utf8') while (content.length && !isUtf8(content)) content = content.subarray(0, content.length - 1);
       return { path: obj.path, sha: obj.sha, size, encoding, content: content.toString(encoding), truncated: size > maxBytes };
@@ -96,8 +106,12 @@ export function createScm(runner: GitRunner = createGitRunner()): Scm {
       const range = `${left}${opts.threeDot ? '...' : '..'}${right}`;
       const common = ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames'];
       const raw = parseRaw((await run(repo, [...common, '--raw', '-z', range, '--'])).stdout.toString());
-      const patches = (await run(repo, [...common, '--patch', range, '--'])).stdout.toString().split(/^diff --git /mu).slice(1);
-      return { base: left, head: right, mergeBase, truncated: raw.length > maxFiles, files: raw.slice(0, maxFiles).map((file, i) => ({ ...file, ...parsePatch(patches[i] ?? '') })) };
+      const selected = raw.slice(0, maxFiles);
+      const paths = [...new Set(selected.flatMap(file => [file.oldPath, file.newPath].filter((path): path is string => path !== null)))];
+      const maxLines = count(opts.maxLines, 20_000), maxPatchBytes = count(opts.maxPatchBytes, 8 * 1024 * 1024);
+      const patch = paths.length ? await runner.run(['--literal-pathspecs', ...common, '--patch', range, '--', ...paths], { cwd: repo, truncateAt: maxPatchBytes }) : undefined;
+      const parsed = matchPatches(selected, patch?.stdout.toString() ?? '', maxLines);
+      return { base: left, head: right, mergeBase, truncated: raw.length > maxFiles || !!patch?.truncated || parsed.truncated, files: parsed.files };
     },
     async blame(repo, ref, path) {
       const obj = await object(repo, ref, path), sha = await required(repo, ref);
