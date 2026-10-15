@@ -20,6 +20,22 @@ src/
 test/          cross-module integration / end-to-end flows                      [P1: api-app]
 ```
 
+### Phase 2 additions
+
+```
+src/
+  policy/      .forge/policy.yml schema + parse, glob matcher, risk assessment,
+               merge decision (pure)                                            [P2a]
+  guards/      secret scanner, dependency extraction + registry existence checks [P2a]
+  provenance/  Ed25519 signing key, canonical JSON, signed push statements       [P2a]
+  hooks/       hook scripts + runner, one-time hook sessions, /internal/hooks
+               callback, quarantine-bound git runner                            [P2a]
+  workflow/    Change Request service, push service (guards + provenance),
+               triage                                                           [P2b]
+```
+
+`policy`, `guards` and `provenance` are pure or nearly pure and import only `shared` and `scm` *types*. `workflow` is the only module that composes them with `db` and `scm`. See ADR 0005 and ADR 0006.
+
 Dependencies point downward only: `api → auth, git, scm, db → shared`. `git` and `scm` never import `db` or `auth`. They take absolute repo paths, so they stay reusable and easy to test.
 
 ## Request flow
