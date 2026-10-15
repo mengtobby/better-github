@@ -26,6 +26,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   app.onError(createErrorHandler(deps.logger));
   app.notFound(c => c.json(fail('NOT_FOUND', 'Not found'), 404));
+  app.use('*', createRateLimit(deps.config.rateLimitPerMinute, deps.clock));
   app.use('*', authMiddleware(deps.tokens));
   app.use('*', createRateLimit(deps.config.rateLimitPerMinute, deps.clock));
   const strict = createRateLimit(deps.config.authRateLimitPerMinute, deps.clock);

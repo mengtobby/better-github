@@ -9,11 +9,12 @@ import { assertValidName } from '../../git/names.js';
 import { assertSafeRef } from '../../scm/validate.js';
 import { forbidden, notFound } from '../../shared/errors.js';
 import { ok } from '../../shared/envelope.js';
+import type { ErrorLogger } from '../../shared/http.js';
 import { parseInput, parseJsonBody } from '../../shared/http.js';
 import { resolveRepo } from '../repo-lookup.js';
 
 const patch = z.object({ description: z.string().max(10000).optional(), visibility: z.enum(['public', 'private']).optional(), defaultBranch: z.string().min(1).superRefine(value => { assertSafeRef(value); }).optional() });
-export function createRepoRoutes(deps: { readonly store: Store; readonly storage: RepoStorage; readonly publicUrl: string }): Hono<AppEnv> {
+export function createRepoRoutes(deps: { readonly store: Store; readonly storage: RepoStorage; readonly publicUrl: string; readonly logger?: ErrorLogger }): Hono<AppEnv> {
   const app = new Hono<AppEnv>(), { store, storage } = deps;
   app.use('/:owner/:name', async (c, next) => {
     const params = parseInput(z.object({ owner: z.string(), name: z.string() }), c.req.param());
@@ -39,7 +40,8 @@ export function createRepoRoutes(deps: { readonly store: Store; readonly storage
   });
   app.patch('/:owner/:name', async c => {
     const { owner, repo } = resolveRepo(store, c.req.param('owner'), c.req.param('name'));
-    const p = requirePrincipal(c); assertRepoAccess(p, repo, 'admin');
+    assertRepoAccess(c.get('principal'), repo, 'admin');
+    const p = requirePrincipal(c);
     const input = await parseJsonBody(c, patch);
     const updated = store.transaction(() => {
       const updated = store.repositories.update(repo.id, input);
@@ -49,9 +51,13 @@ export function createRepoRoutes(deps: { readonly store: Store; readonly storage
   });
   app.delete('/:owner/:name', async c => {
     const { owner, repo } = resolveRepo(store, c.req.param('owner'), c.req.param('name'));
-    const p = requirePrincipal(c); assertRepoAccess(p, repo, 'admin');
-    await storage.remove(owner.handle, repo.name);
+    assertRepoAccess(c.get('principal'), repo, 'admin');
+    const p = requirePrincipal(c);
     store.transaction(() => { store.repositories.delete(repo.id); store.audit.append({ actorType: p.type, actorId: p.id, action: 'repo.delete', target: repo.id }); });
+    try { await storage.remove(owner.handle, repo.name); }
+    catch {
+      (deps.logger ?? { error: (message, context) => console.error(message, context) }).error('Repository storage removal failed', { repoId: repo.id });
+    }
     return c.json(ok({ deleted: true }));
   });
   return app;

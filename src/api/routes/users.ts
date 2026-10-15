@@ -3,7 +3,6 @@ import { z } from 'zod';
 import type { AppEnv } from '../../auth/middleware.js';
 import { requirePrincipal } from '../../auth/middleware.js';
 import { hashPassword } from '../../auth/passwords.js';
-import { canAccessRepo } from '../../auth/permissions.js';
 import type { Store } from '../../db/store.js';
 import { assertValidName } from '../../git/names.js';
 import { notFound } from '../../shared/errors.js';
@@ -34,9 +33,20 @@ export function createUserRoutes(deps: { readonly store: Store; readonly publicU
     const owner = store.users.findByHandle(handle); if (!owner) throw notFound('User');
     const q = parseInput(z.object({ page: z.coerce.number().int().min(1).max(1_000_000).default(1), limit: z.coerce.number().int().min(1).max(100).default(30) }), c.req.query());
     const p = c.get('principal');
-    const all = store.repositories.listByOwner(owner.id, { limit: Number.MAX_SAFE_INTEGER, offset: 0, includePrivate: true }).items.filter(repo => canAccessRepo(p, repo, 'read'));
-    const items = all.slice((q.page - 1) * q.limit, q.page * q.limit).map(repo => ({ ...repo, cloneUrl: `${deps.publicUrl}/${owner.handle}/${repo.name}.git` }));
-    return c.json(ok(items, { total: all.length, ...q }));
+    const includePrivate = p !== null && p.userId === owner.id
+      && p.scopes.some(scope => ['repo:read', 'repo:write', 'repo:admin'].includes(scope));
+    const offset = (q.page - 1) * q.limit;
+    const page = p?.repoIds !== null && p?.repoIds !== undefined
+      ? (() => {
+        const visible = [...new Set(p.repoIds)].flatMap(id => {
+          const repo = store.repositories.findById(id);
+          return repo && repo.ownerId === owner.id && (includePrivate || repo.visibility === 'public') ? [repo] : [];
+        }).sort((a, b) => a.name.localeCompare(b.name));
+        return { items: visible.slice(offset, offset + q.limit), total: visible.length };
+      })()
+      : store.repositories.listByOwner(owner.id, { limit: q.limit, offset, includePrivate });
+    const items = page.items.map(repo => ({ ...repo, cloneUrl: `${deps.publicUrl}/${owner.handle}/${repo.name}.git` }));
+    return c.json(ok(items, { total: page.total, ...q }));
   });
   return app;
 }

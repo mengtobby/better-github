@@ -20,6 +20,7 @@ const defaultLogger: ErrorLogger = {
 export function createErrorHandler(logger: ErrorLogger = defaultLogger) {
   return (err: Error, c: Context): Response => {
     if (isAppError(err)) {
+      for (const [name, value] of Object.entries(err.headers)) c.header(name, value);
       return c.json(fail(err.code, err.message, err.details), err.status as ContentfulStatusCode);
     }
     logger.error('unhandled error', {

@@ -10,7 +10,9 @@ const positive = z.coerce.number().int().positive().safe();
 const schema = z.object({
   HOST: z.string().min(1).default('127.0.0.1'), PORT: positive.max(65535).default(3000),
   DATA_DIR: z.string().min(1).default('./data'), GIT_BIN: z.string().min(1).default('git'),
-  PUBLIC_URL: z.url().refine(value => ['http:', 'https:'].includes(new URL(value).protocol)).optional(),
+  PUBLIC_URL: z.string().refine(value => {
+    try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; }
+  }).optional(),
   RATE_LIMIT_PER_MINUTE: positive.default(600), AUTH_RATE_LIMIT_PER_MINUTE: positive.default(20),
 });
 export function loadConfig(env: Readonly<Record<string, string | undefined>>): Config {

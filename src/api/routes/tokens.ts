@@ -15,7 +15,7 @@ export function createTokenRoutes(deps: { readonly store: Store; readonly tokens
   const app = new Hono<AppEnv>(), { store, tokens } = deps;
   app.post('/tokens', async c => {
     const input = await parseJsonBody(c, z.object({ handle: z.string().optional(), password: z.string().max(200).optional(),
-      scopes: z.array(z.enum(ALL_SCOPES)).optional(), ttlSeconds: z.number().int().positive().max(90 * 86400).optional(), label: z.string().max(200).optional() }));
+      scopes: z.array(z.enum(ALL_SCOPES)).optional(), repoIds: z.array(z.string().min(1)).nullable().optional(), ttlSeconds: z.number().int().positive().max(90 * 86400).optional(), label: z.string().max(200).optional() }));
     const p = c.get('principal');
     let userId: string;
     if (p) {
@@ -29,7 +29,7 @@ export function createTokenRoutes(deps: { readonly store: Store; readonly tokens
       userId = user.id;
     }
     const issued = store.transaction(() => {
-      const issued = tokens.issueUserToken(userId, { scopes: input.scopes ?? (p ? p.scopes : ALL_SCOPES), ttlMs: input.ttlSeconds === undefined ? undefined : input.ttlSeconds * 1000, label: input.label }, p ?? null);
+      const issued = tokens.issueUserToken(userId, { repoIds: input.repoIds, scopes: input.scopes ?? (p ? p.scopes : ALL_SCOPES), ttlMs: input.ttlSeconds === undefined ? undefined : input.ttlSeconds * 1000, label: input.label }, p ?? null);
       store.audit.append({ actorType: 'user', actorId: userId, action: 'token.create', target: issued.record.id });
       return issued;
     });

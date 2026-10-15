@@ -8,6 +8,7 @@ describe('configuration', () => {
   });
   it('reports invalid keys together', () => {
     expect(() => loadConfig({ PORT: 'bad', RATE_LIMIT_PER_MINUTE: '0' })).toThrow(/PORT.*RATE_LIMIT_PER_MINUTE/u);
+    expect(() => loadConfig({ PORT: 'bad', PUBLIC_URL: 'not a URL' })).toThrow(/PORT.*PUBLIC_URL/u);
     expect(() => loadConfig({ PUBLIC_URL: 'file:///secret' })).toThrow('PUBLIC_URL');
   });
   it('supports explicit values and IPv6', () => {

@@ -111,3 +111,12 @@ it('merges and audits, reports up-to-date and leaves conflicted branches unchang
   expect(await git(['rev-parse', 'main'])).toBe(mergedSha);
   expect(store.audit.list({ limit: 10 }).filter(event => event.action === 'repo.merge')).toHaveLength(3);
 });
+
+it('normalizes uppercase expected target SHAs and accepts SHA-256', async () => {
+  const response = await app.request(url('merges'), { method: 'POST', headers: auth,
+    body: JSON.stringify({ target: 'main', source: 'main', message: 'Merge', expectedTargetSha: root.toUpperCase() }) });
+  expect(response.status).toBe(200);
+  const sha256 = await app.request(url('merges'), { method: 'POST', headers: auth,
+    body: JSON.stringify({ target: 'main', source: 'main', message: 'Merge', expectedTargetSha: 'A'.repeat(64) }) });
+  expect(sha256.status).toBe(409);
+});

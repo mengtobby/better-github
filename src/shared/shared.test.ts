@@ -121,3 +121,14 @@ describe('http', () => {
     expect(invalid.status).toBe(400);
   });
 });
+
+it('copies response headers and applies them through the shared handler', async () => {
+  const headers = { 'WWW-Authenticate': 'Basic realm="better-github"' };
+  const error = new AppError('UNAUTHORIZED', 'Authentication required', undefined, { headers });
+  headers['WWW-Authenticate'] = 'changed';
+  const app = new Hono(); app.onError(createErrorHandler());
+  app.get('/', () => { throw error; });
+  const response = await app.request('/');
+  expect(response.status).toBe(401);
+  expect(response.headers.get('WWW-Authenticate')).toBe('Basic realm="better-github"');
+});

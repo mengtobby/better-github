@@ -6,7 +6,7 @@ import { assertRepoAccess } from '../../auth/permissions.js';
 import type { Store } from '../../db/store.js';
 import type { RepoStorage } from '../../git/storage.js';
 import { parseGitPath, serveGitHttp } from '../../git/smart-http.js';
-import { fail } from '../../shared/envelope.js';
+import { AppError } from '../../shared/errors.js';
 import { resolveRepo } from '../repo-lookup.js';
 
 export interface GitRouteDeps { readonly store: Store; readonly storage: RepoStorage; readonly gitBin?: string }
@@ -22,14 +22,16 @@ export function createGitRoutes(deps: GitRouteDeps): Hono<AppEnv> {
     const url = new URL(c.req.url);
     const route = parseGitPath(url.pathname, c.req.method, url.searchParams);
     if (!route) return c.notFound();
-    const { owner, repo } = resolveRepo(deps.store, route.owner, route.name);
     const principal = c.get('principal');
     const action = route.service === 'git-receive-pack' ? 'write' : 'read';
-    if (!principal && (repo.visibility === 'private' || action === 'write')) {
-      return c.json(fail('UNAUTHORIZED', 'Authentication required'), 401, {
+    const candidateOwner = deps.store.users.findByHandle(route.owner);
+    const candidate = candidateOwner && deps.store.repositories.findByOwnerAndName(candidateOwner.id, route.name);
+    if (!principal && (action === 'write' || !candidate || candidate.visibility !== 'public')) {
+      throw new AppError('UNAUTHORIZED', 'Authentication required', undefined, { headers: {
         'WWW-Authenticate': 'Basic realm="better-github"',
-      });
+      } });
     }
+    const { owner, repo } = resolveRepo(deps.store, route.owner, route.name);
     assertRepoAccess(principal, repo, action);
     const rest = route.kind === 'advertise' ? 'info/refs' : route.service;
     const response = await serveGitHttp(c.req.raw, {
@@ -38,10 +40,13 @@ export function createGitRoutes(deps: GitRouteDeps): Hono<AppEnv> {
       remoteUser: principal?.handle,
       remoteAddr: remoteAddress(c),
       gitBin: deps.gitBin,
+      onComplete: outcome => {
+        if (route.kind === 'rpc' && action === 'write' && principal
+          && outcome.exitCode === 0 && !outcome.aborted && !outcome.timedOut) {
+          deps.store.audit.append({ actorType: principal.type, actorId: principal.id, action: 'git.push', target: repo.id });
+        }
+      },
     });
-    if (response.ok && route.kind === 'rpc' && action === 'write' && principal) {
-      deps.store.audit.append({ actorType: principal.type, actorId: principal.id, action: 'git.push', target: repo.id });
-    }
     return response;
   });
   return app;
