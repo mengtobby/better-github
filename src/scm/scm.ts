@@ -5,7 +5,7 @@ import { AppError, notFound } from '../shared/errors.js';
 import { createGitRunner } from './runner.js';
 import type { GitRunner } from './runner.js';
 import { assertRepo, assertSafePath, assertSafeRef } from './validate.js';
-import { matchPatches, parseRaw } from './diff-parse.js';
+import { matchPatches, splitDiffOutput } from './diff-parse.js';
 import { parseBlame } from './blame-parse.js';
 import { mergeRepo } from './merge.js';
 import type { Ref, TreeEntry, Blob, Commit, Diff, BlameRange, MergeInput, MergeResult } from './types.js';
@@ -105,13 +105,11 @@ export function createScm(runner: GitRunner = createGitRunner()): Scm {
       const mergeBase = await scm.mergeBase(repo, left, right);
       const range = `${left}${opts.threeDot ? '...' : '..'}${right}`;
       const common = ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames'];
-      const raw = parseRaw((await run(repo, [...common, '--raw', '-z', range, '--'])).stdout.toString());
-      const selected = raw.slice(0, maxFiles);
-      const paths = [...new Set(selected.flatMap(file => [file.oldPath, file.newPath].filter((path): path is string => path !== null)))];
       const maxLines = count(opts.maxLines, 20_000), maxPatchBytes = count(opts.maxPatchBytes, 8 * 1024 * 1024);
-      const patch = paths.length ? await runner.run(['--literal-pathspecs', ...common, '--patch', range, '--', ...paths], { cwd: repo, truncateAt: maxPatchBytes }) : undefined;
-      const parsed = matchPatches(selected, patch?.stdout.toString() ?? '', maxLines);
-      return { base: left, head: right, mergeBase, truncated: raw.length > maxFiles || !!patch?.truncated || parsed.truncated, files: parsed.files };
+      const output = await runner.run([...common, '--patch-with-raw', '-z', range, '--'], { cwd: repo, truncateAt: maxPatchBytes });
+      const parts = splitDiffOutput(output.stdout.toString(), maxFiles);
+      const parsed = matchPatches(parts.raw, parts.patch, maxLines);
+      return { base: left, head: right, mergeBase, truncated: parts.truncated || output.truncated || parsed.truncated, files: parsed.files };
     },
     async blame(repo, ref, path) {
       const obj = await object(repo, ref, path), sha = await required(repo, ref);

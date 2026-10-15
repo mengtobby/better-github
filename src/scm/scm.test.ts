@@ -42,7 +42,7 @@ describe('SCM reads', () => {
   it('handles binary and invalid UTF8 plus nested trees', async () => {
     const f = await fixture();
     const binary = await f.blob(Buffer.from([0, 255, 1]));
-    const utf = await f.blob('éhello');
+    const utf = await f.blob('ï¿½hello');
     const sub = await f.git(['mktree'], `100644 blob ${binary}\tb.bin\n`);
     const tree = await f.git(['mktree'], `040000 tree ${sub}\tsub\n100644 blob ${utf}\tu.txt\n`);
     const sha = await f.git(['commit-tree', tree], 'nested');
@@ -173,17 +173,48 @@ it('rejects unsafe blob sizes before reading content', async () => {
   await expect(invalid.readBlob(f.repo, f.root, 'a.txt')).rejects.toMatchObject({ code: 'INTERNAL' });
 });
 
-it('requests patches only for the retained literal paths', async () => {
+it('requests raw and patches together without pathspec arguments', async () => {
   const f = await fixture();
   const head = await f.commit({ 'a.txt': await f.blob('changed\n'), 'z.txt': await f.blob('extra\n') }, [f.root]);
   const patchCalls: (readonly string[])[] = [];
   const limited = createScm({ async run(args, opts) {
-    if (args.includes('--patch')) patchCalls.push(args);
+    if (args.includes('--patch-with-raw')) patchCalls.push(args);
     return runner.run(args, opts);
   } });
   const diff = await limited.diff(f.repo, f.root, head, { maxFiles: 1 });
   expect(diff).toMatchObject({ truncated: true, files: [expect.objectContaining({ newPath: 'a.txt' })] });
   expect(patchCalls).toHaveLength(1);
-  expect(patchCalls[0]?.[0]).toBe('--literal-pathspecs');
-  expect(patchCalls[0]?.slice(patchCalls[0].indexOf('--') + 1)).toEqual(['a.txt']);
+  expect(patchCalls[0]?.[0]).toBe('diff');
+  expect(patchCalls[0]?.slice(patchCalls[0].indexOf('--') + 1)).toEqual([]);
+});
+
+
+it('compares 300 long UTF8 space-heavy paths without a pathspec argv list', async () => {
+  const f = await fixture();
+  const before = await f.blob('before\n'), after = await f.blob('after\n');
+  const names = Array.from({ length: 300 }, (_, i) => '\u00e9 ' + 'many spaces '.repeat(11) + i);
+  const base = await f.commit(Object.fromEntries(names.map(name => [name, before])), [f.root]);
+  const head = await f.commit(Object.fromEntries(names.map(name => [name, after])), [base]);
+  const start = performance.now();
+  const diff = await scm.diff(f.repo, base, head);
+  expect(performance.now() - start).toBeLessThan(2000);
+  expect(diff.files).toHaveLength(300);
+  expect(diff.files.every(file => file.hunks.length === 1)).toBe(true);
+  expect(diff.truncated).toBe(false);
+});
+
+it('keeps every patch paired when rename detection exceeds its limit', async () => {
+  const f = await fixture();
+  const blobs = await Promise.all(Array.from({ length: 6 }, (_, i) => f.blob(('unique ' + i + '\n').repeat(20))));
+  const changed = await Promise.all(Array.from({ length: 6 }, (_, i) => f.blob(('unique ' + i + '\n').repeat(19) + 'changed\n')));
+  const base = await f.commit(Object.fromEntries(blobs.map((blob, i) => [i + '-old', blob])), [f.root]);
+  const head = await f.commit(Object.fromEntries(changed.map((blob, i) => [i + '-new', blob])), [base]);
+  const limited = createScm({ async run(args, opts) { return runner.run(['-c', 'diff.renameLimit=1', ...args], opts); } });
+  const diff = await limited.diff(f.repo, base, head);
+  expect(diff.files.length).toBeGreaterThan(0);
+  expect(diff.files.every(file => file.hunks.length > 0)).toBe(true);
+  const selected = await limited.diff(f.repo, base, head, { maxFiles: 2 });
+  expect(selected.files).toHaveLength(2);
+  expect(selected.truncated).toBe(true);
+  expect(selected.files.every(file => file.hunks.length > 0)).toBe(true);
 });

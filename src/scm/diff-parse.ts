@@ -31,36 +31,53 @@ export function parseRaw(raw: string): readonly Pick<DiffFile, 'oldPath' | 'newP
   return result;
 }
 
-
-function decodePath(value: string): string {
-  if (!value.startsWith('"')) return value;
-  const bytes: number[] = [];
-  const escapes: Readonly<Record<string, number>> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
-  for (let i = 1; i < value.length - 1; i++) {
-    if (value[i] !== '\\') bytes.push(...Buffer.from(value[i]!));
-    else {
-      const octal = /^[0-7]{1,3}/u.exec(value.slice(i + 1));
-      if (octal) { bytes.push(parseInt(octal[0], 8)); i += octal[0].length; }
-      else { bytes.push(escapes[value[++i]!] ?? 63); }
+export function splitDiffOutput(output: string, maxFiles: number): { readonly raw: ReturnType<typeof parseRaw>; readonly patch: string; readonly truncated: boolean } {
+  let cursor = 0, count = 0;
+  const records: string[] = [];
+  while (output[cursor] === ':') {
+    const start = cursor, headerEnd = output.indexOf('\0', cursor);
+    if (headerEnd < 0) return { raw: parseRaw(records.join('')), patch: '', truncated: true };
+    const renamed = / [RC]\d*$/u.test(output.slice(cursor, headerEnd));
+    cursor = headerEnd + 1;
+    for (let paths = renamed ? 2 : 1; paths > 0; paths--) {
+      const end = output.indexOf('\0', cursor);
+      if (end < 0) return { raw: parseRaw(records.join('')), patch: '', truncated: true };
+      cursor = end + 1;
     }
+    if (count++ < maxFiles) records.push(output.slice(start, cursor));
   }
-  return Buffer.from(bytes).toString();
+  return { raw: parseRaw(records.join('')), patch: output.slice(output[cursor] === '\0' ? cursor + 1 : cursor), truncated: count > maxFiles };
 }
-function matchesHeader(header: string, file: Pick<DiffFile, 'oldPath' | 'newPath'>): boolean {
-  for (let i = 0; i < header.length; i++) {
-    if (header[i] !== ' ') continue;
-    const oldPath = decodePath(header.slice(0, i)), newPath = decodePath(header.slice(i + 1));
-    if (oldPath === `a/${file.oldPath ?? file.newPath}` && newPath === `b/${file.newPath ?? file.oldPath}`) return true;
-  }
-  return false;
+
+// Git still C-quotes patch headers with -z; encode each retained path once.
+function patchPath(path: string): string {
+  const escapes: Readonly<Record<number, string>> = { 7: '\\a', 8: '\\b', 9: '\\t', 10: '\\n', 11: '\\v', 12: '\\f', 13: '\\r', 34: '\\"', 92: '\\\\' };
+  const bytes = Buffer.from(path);
+  if (!bytes.some(byte => byte < 32 || byte >= 127 || byte === 34 || byte === 92)) return path;
+  return '"' + Array.from(bytes, byte => escapes[byte] ?? (byte < 32 || byte >= 127 ? '\\' + byte.toString(8).padStart(3, '0') : String.fromCharCode(byte))).join('') + '"';
 }
+
 export function matchPatches(raw: readonly Pick<DiffFile, 'oldPath' | 'newPath' | 'status'>[], patch: string, maxLines: number): { readonly files: readonly DiffFile[]; readonly truncated: boolean } {
-  const allLines = patch.split('\n');
-  if (allLines.at(-1) === '') allLines.pop();
-  const truncated = allLines.length > maxLines;
-  const sections = allLines.slice(0, maxLines).join('\n').split(/^diff --git /mu).slice(1);
+  const sections = new Map<string, string[]>();
+  const header = (file: Pick<DiffFile, 'oldPath' | 'newPath'>): string => 'diff --git a/' + (file.oldPath ?? file.newPath) + ' b/' + (file.newPath ?? file.oldPath);
+  for (const file of raw) {
+    const bodies: string[] = [];
+    sections.set(header(file), bodies);
+    sections.set('diff --git ' + patchPath('a/' + (file.oldPath ?? file.newPath)) + ' ' + patchPath('b/' + (file.newPath ?? file.oldPath)), bodies);
+  }
+  let current: string[] | undefined;
+  let body: string[] = [];
+  const flush = (): void => { if (current) current.push(body.join('\n')); body = []; };
+  const lines = patch.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  const truncated = lines.length > maxLines;
+  for (const line of lines.slice(0, maxLines)) {
+    if (line.startsWith('diff --git ')) { flush(); current = sections.get(line); }
+    else if (current) body.push(line);
+  }
+  flush();
   const files = raw.map(file => {
-    const patches = sections.filter(section => matchesHeader(section.split('\n')[0]!, file)).map(parsePatch);
+    const patches = sections.get(header(file))!.map(parsePatch);
     return { ...file, hunks: patches.flatMap(part => part.hunks), binary: patches.some(part => part.binary), additions: patches.reduce((sum, part) => sum + part.additions, 0), deletions: patches.reduce((sum, part) => sum + part.deletions, 0) };
   });
   return { files, truncated };

@@ -26,7 +26,9 @@ export async function mergeRepo(runner: GitRunner, repo: string, input: MergeInp
     const identity = { GIT_AUTHOR_NAME: input.author.name, GIT_AUTHOR_EMAIL: input.author.email, GIT_COMMITTER_NAME: input.author.name, GIT_COMMITTER_EMAIL: input.author.email };
     sha = (await runner.run(args, { cwd: repo, input: input.message, env: identity })).stdout.toString().trim();
   }
-  if ((await runner.run(['update-ref', branch, sha, expected], { cwd: repo, allowExitCodes: [1, 128] })).exitCode !== 0) {
+  const update = await runner.run(['update-ref', branch, sha, expected], { cwd: repo, allowExitCodes: [1, 128] });
+  if (update.exitCode !== 0) {
+    if (/cannot lock ref|\.lock/iu.test(update.stderr)) throw conflict('Target branch is locked');
     if (await resolve(branch) !== expected) throw conflict('Target branch changed');
     throw new AppError('INTERNAL', 'Git operation failed');
   }
