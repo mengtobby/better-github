@@ -8,4 +8,5 @@ export interface Principal {
   readonly scopes: readonly Scope[];
   readonly repoIds: readonly string[] | null;
   readonly tokenId: string;
+  readonly expiresAt: string;
 }

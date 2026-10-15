@@ -6,7 +6,7 @@ import { assertRepoAccess, canAccessRepo, hasScope } from './permissions.js';
 const repo: Repository = { id: 'repo', ownerId: 'owner', name: 'repo', description: '',
   visibility: 'private', defaultBranch: 'main', createdAt: '2026-01-01T00:00:00Z' };
 function principal(scopes: readonly Scope[], patch: Partial<Principal> = {}): Principal {
-  return { type: 'user', id: 'owner', userId: 'owner', handle: 'owner', scopes, repoIds: null, tokenId: 'token', ...patch };
+  return { type: 'user', id: 'owner', userId: 'owner', handle: 'owner', scopes, repoIds: null, tokenId: 'token', expiresAt: '2027-01-01T00:00:00Z', ...patch };
 }
 
 describe('repository permissions', () => {

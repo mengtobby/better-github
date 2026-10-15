@@ -36,10 +36,12 @@ beforeEach(async () => {
   await storage.create('alice', 'demo', { defaultBranch: 'main' });
   await storage.create('alice', 'secret', { defaultBranch: 'main' });
   const tokens = createTokenService(store);
-  basic = `Basic ${Buffer.from(`alice:${tokens.issueUserToken(owner.id, { scopes: ['repo:write'] }).token}`).toString('base64')}`;
-  outsider = `Bearer ${tokens.issueUserToken(other.id, { scopes: ['repo:write'] }).token}`;
+  basic = `Basic ${Buffer.from(`alice:${tokens.issueUserToken(owner.id, { scopes: ['repo:write'] }, null).token}`).toString('base64')}`;
+  outsider = `Bearer ${tokens.issueUserToken(other.id, { scopes: ['repo:write'] }, null).token}`;
+  const sponsor = tokens.authenticate(tokens.issueUserToken(owner.id, { scopes: ['agents:manage', 'repo:write'] }, null).token);
+  if (!sponsor) throw new Error('sponsor token failed to authenticate');
   const agent = store.agents.create({ handle: 'bot', displayName: 'Bot', sponsorUserId: owner.id });
-  excluded = `Bearer ${tokens.issueAgentToken(owner.id, agent.id, { scopes: ['repo:write'], repoIds: [] }).token}`;
+  excluded = `Bearer ${tokens.issueAgentToken(owner.id, agent.id, { scopes: ['repo:write'], repoIds: [] }, sponsor).token}`;
   app = new Hono<AppEnv>(); app.onError(createErrorHandler()); app.use('*', authMiddleware(tokens));
   app.route('/', createGitRoutes({ store, storage }));
 });

@@ -19,7 +19,7 @@ beforeEach(() => {
   const store = createStore(db, clock);
   const user = store.users.create({ handle: 'alice', email: 'alice', passwordHash: 'hash' });
   const tokens = createTokenService(store, clock);
-  raw = tokens.issueUserToken(user.id, { scopes: [] }).token;
+  raw = tokens.issueUserToken(user.id, { scopes: [] }, null).token;
   app = new Hono<AppEnv>();
   app.onError(createErrorHandler());
   app.use('*', authMiddleware(tokens));

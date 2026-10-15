@@ -1,5 +1,6 @@
 import type { Db } from './database.js';
 import type { Clock } from '../shared/clock.js';
+import { conflict } from '../shared/errors.js';
 import { newId } from '../shared/ids.js';
 import type { AgentRepo } from './store.js';
 import type { Agent } from './types.js';
@@ -9,10 +10,15 @@ export function createAgentRepo(db: Db, clock: Clock): AgentRepo {
   const findById = (id: string): Agent | null => get(db, 'SELECT * FROM agents WHERE id = ?', id);
   return Object.freeze({
     create(input) {
-      const id = newId('agt');
-      write(db, 'INSERT INTO agents VALUES (?, ?, ?, ?, ?, ?, NULL)', id, input.handle,
-        input.sponsorUserId, input.displayName, input.model ?? null, clock().toISOString());
-      return findById(id)!;
+      return db.transaction(() => {
+        if (db.prepare('SELECT id FROM users WHERE handle = ?').get(input.handle)) {
+          throw conflict('Handle already taken', { field: 'handle' });
+        }
+        const id = newId('agt');
+        write(db, 'INSERT INTO agents VALUES (?, ?, ?, ?, ?, ?, NULL)', id, input.handle,
+          input.sponsorUserId, input.displayName, input.model ?? null, clock().toISOString());
+        return findById(id)!;
+      }).immediate();
     },
     findById,
     findByHandle: (handle: string): Agent | null => get(db, 'SELECT * FROM agents WHERE handle = ?', handle),
