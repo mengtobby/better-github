@@ -38,10 +38,9 @@ export function createUserRoutes(deps: { readonly store: Store; readonly publicU
     const offset = (q.page - 1) * q.limit;
     const page = p?.repoIds !== null && p?.repoIds !== undefined
       ? (() => {
-        const visible = [...new Set(p.repoIds)].flatMap(id => {
-          const repo = store.repositories.findById(id);
-          return repo && repo.ownerId === owner.id && (includePrivate || repo.visibility === 'public') ? [repo] : [];
-        }).sort((a, b) => a.name.localeCompare(b.name));
+        const allowed = new Set(p.repoIds);
+        const visible = store.repositories.listByOwner(owner.id, { limit: Number.MAX_SAFE_INTEGER, offset: 0, includePrivate })
+          .items.filter(repo => allowed.has(repo.id));
         return { items: visible.slice(offset, offset + q.limit), total: visible.length };
       })()
       : store.repositories.listByOwner(owner.id, { limit: q.limit, offset, includePrivate });

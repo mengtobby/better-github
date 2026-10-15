@@ -50,3 +50,29 @@ it('preserves storage when the deletion transaction fails', async () => {
     expect(await f.storage.exists('alice', 'demo')).toBe(true);
   } finally { await f.close(); }
 });
+
+it('reclaims orphaned storage after a failed delete and preserves live duplicates', async () => {
+  const f = await fixture();
+  try {
+    const token = await f.signup();
+    let failRemove = true;
+    const messages: string[] = [];
+    const app = createApp({ ...f, logger: { error: message => { messages.push(message); } }, storage: {
+      ...f.storage, remove: async (owner, name) => {
+        if (failRemove) { failRemove = false; throw new Error('cleanup failed'); }
+        await f.storage.remove(owner, name);
+      },
+    } });
+    const request = async (method: string): Promise<Response> => app.request(method === 'DELETE' ? '/api/v1/repos/alice/demo' : '/api/v1/repos', {
+      method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: method === 'POST' ? JSON.stringify({ name: 'demo' }) : undefined,
+    });
+    expect((await request('POST')).status).toBe(201);
+    expect((await request('DELETE')).status).toBe(200);
+    expect(await f.storage.exists('alice', 'demo')).toBe(true);
+    expect((await request('POST')).status).toBe(201);
+    expect(messages).toContain('Reclaimed orphaned repository storage');
+    expect((await request('POST')).status).toBe(409);
+    expect(await f.storage.exists('alice', 'demo')).toBe(true);
+  } finally { await f.close(); }
+});

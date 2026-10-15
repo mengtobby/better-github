@@ -28,16 +28,19 @@ export function createTokenRoutes(deps: { readonly store: Store; readonly tokens
       if (!valid || !user) throw unauthorized('Invalid credentials');
       userId = user.id;
     }
+    const repoIds = input.repoIds === undefined ? p?.repoIds : input.repoIds;
+    if (repoIds?.some(id => store.repositories.findById(id)?.ownerId !== userId)) throw forbidden();
     const issued = store.transaction(() => {
-      const issued = tokens.issueUserToken(userId, { repoIds: input.repoIds, scopes: input.scopes ?? (p ? p.scopes : ALL_SCOPES), ttlMs: input.ttlSeconds === undefined ? undefined : input.ttlSeconds * 1000, label: input.label }, p ?? null);
+      const issued = tokens.issueUserToken(userId, { repoIds, scopes: input.scopes ?? (p ? p.scopes : ALL_SCOPES), ttlMs: input.ttlSeconds === undefined ? undefined : input.ttlSeconds * 1000, label: input.label }, p ?? null);
       store.audit.append({ actorType: 'user', actorId: userId, action: 'token.create', target: issued.record.id });
       return issued;
     });
     return c.json(ok({ token: issued.token, id: issued.record.id, scopes: issued.record.scopes, expiresAt: issued.record.expiresAt }), 201);
   });
   app.delete('/tokens/:id', c => {
-    const p = requirePrincipal(c); if (p.type !== 'user' || !p.scopes.includes('tokens:manage')) throw forbidden();
+    const p = requirePrincipal(c);
     const id = parseInput(z.string().min(1).max(200), c.req.param('id'));
+    if (id !== p.tokenId && (p.type !== 'user' || !p.scopes.includes('tokens:manage'))) throw forbidden();
     store.transaction(() => { tokens.revoke(id, p); store.audit.append({ actorType: p.type, actorId: p.id, action: 'token.revoke', target: id }); });
     return c.json(ok({ revoked: true }));
   });

@@ -8,7 +8,7 @@ import type { RepoStorage } from '../git/storage.js';
 import type { Scm } from '../scm/scm.js';
 import type { Clock } from '../shared/clock.js';
 import type { ErrorLogger } from '../shared/http.js';
-import { createErrorHandler } from '../shared/http.js';
+import { createErrorHandler, defaultLogger } from '../shared/http.js';
 import { isAppError } from '../shared/errors.js';
 import { ok, fail } from '../shared/envelope.js';
 import { createRateLimit } from './rate-limit.js';
@@ -25,7 +25,8 @@ export interface AppDeps {
 }
 export function createApp(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
-  app.onError(createErrorHandler(deps.logger));
+  const logger = deps.logger ?? defaultLogger;
+  app.onError(createErrorHandler(logger));
   app.notFound(c => c.json(fail('NOT_FOUND', 'Not found'), 404));
   const authenticate = authMiddleware(deps.tokens);
   const invalidCredentials = createRateLimit(deps.config.authRateLimitPerMinute, deps.clock);
@@ -47,7 +48,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     await next();
   });
   app.get('/healthz', c => c.json(ok({ status: 'ok' })));
-  const common = { ...deps, publicUrl: deps.config.publicUrl };
+  const common = { ...deps, logger, publicUrl: deps.config.publicUrl };
   app.route('/api/v1', createUserRoutes(common));
   app.route('/api/v1', createTokenRoutes(common));
   app.route('/api/v1', createAgentRoutes(common));

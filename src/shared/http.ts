@@ -12,7 +12,7 @@ export interface ErrorLogger {
   error(message: string, context: Record<string, unknown>): void;
 }
 
-const defaultLogger: ErrorLogger = {
+export const defaultLogger: ErrorLogger = {
   error: (message, context) => console.error(message, context),
 };
 
