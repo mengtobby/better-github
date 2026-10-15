@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createErrorHandler } from '../shared/http.js';
 import { assertValidName, isValidName } from './names.js';
 import { createRepoStorage } from './storage.js';
-import { parseGitPath, serveGitHttp } from './smart-http.js';
+import { type GitHttpOutcome, parseGitPath, serveGitHttp } from './smart-http.js';
 
 const execute = promisify(execFile);
 const directories: string[] = [];
@@ -82,6 +82,9 @@ describe('git HTTP transport', () => {
   it('clones, pushes a commit, and reads it through a fresh clone', async () => {
     const root = await temp();
     await createRepoStorage(root).create('alice', 'demo');
+    const outcomes: GitHttpOutcome[] = [];
+    let pushed: (() => void) | undefined;
+    const pushComplete = new Promise<void>((resolve) => { pushed = resolve; });
     const app = new Hono();
     app.onError(createErrorHandler());
     app.all('*', (c) => {
@@ -89,7 +92,9 @@ describe('git HTTP transport', () => {
       const route = parseGitPath(url.pathname, c.req.method, url.searchParams);
       if (!route) return c.notFound();
       return serveGitHttp(c.req.raw, { projectRoot: root, relativePath: url.pathname.slice(1),
-        remoteUser: 'tester', remoteAddr: '127.0.0.1', env: { GIT_TERMINAL_PROMPT: '0' } });
+        onComplete: (outcome) => {
+          if (url.pathname.endsWith('/git-receive-pack')) { outcomes.push(outcome); pushed?.(); }
+        }, remoteUser: 'tester', remoteAddr: '127.0.0.1', env: { GIT_TERMINAL_PROMPT: '0' } });
     });
     const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
     try {
@@ -103,12 +108,36 @@ describe('git HTTP transport', () => {
       await git(['-C', first, 'add', 'hello.txt']);
       await git(['-C', first, 'commit', '-m', 'First commit']);
       await git(['-C', first, 'push', 'origin', 'main']);
+      await pushComplete;
+      expect(outcomes).toEqual([{ exitCode: 0, aborted: false, timedOut: false,
+        bytesOut: expect.any(Number) }]);
+      expect(outcomes[0]?.bytesOut).toBeGreaterThan(0);
       const second = path.join(root, 'second');
       await git(['clone', url, second]);
       expect(await readFile(path.join(second, 'hello.txt'), 'utf8')).toBe('Hello forge\n');
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
+  });
+  it('cancels an idle upload and kills the backend', async () => {
+    const root = await temp();
+    await createRepoStorage(root).create('alice', 'demo');
+    let cancelled = false;
+    let complete: ((outcome: GitHttpOutcome) => void) | undefined;
+    const outcome = new Promise<GitHttpOutcome>((resolve) => { complete = resolve; });
+    const body = new ReadableStream<Uint8Array>({
+      cancel() { cancelled = true; },
+    });
+    const request = new Request('http://localhost/', {
+      method: 'POST', body, duplex: 'half',
+      headers: { 'content-type': 'application/x-git-receive-pack-request' },
+    } as RequestInit);
+    await expect(serveGitHttp(request, {
+      projectRoot: root, relativePath: 'alice/demo.git/git-receive-pack',
+      idleTimeoutMs: 100, onComplete: (result) => complete?.(result),
+    })).rejects.toMatchObject({ code: 'UNPROCESSABLE', message: 'Git request timed out' });
+    expect((await outcome).timedOut).toBe(true);
+    expect(cancelled).toBe(true);
   });
   it('rejects dangerous paths and bodies beyond the limit', async () => {
     const root = await temp();
