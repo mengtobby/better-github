@@ -20,7 +20,7 @@ describe('database and store', () => {
     migrate(db); migrate(db);
     expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
     expect(db.pragma('busy_timeout', { simple: true })).toBe(5000);
-    expect(db.prepare('SELECT * FROM schema_migrations').all()).toHaveLength(1);
+    expect(db.prepare('SELECT * FROM schema_migrations').all()).toHaveLength(2);
     expect(db.pragma('journal_mode', { simple: true })).toBe('memory');
     expect(createStore(db).users.create({ handle: 'real', email: 'real', passwordHash: 'hash' }).createdAt).toMatch(/^\d{4}-/);
   });
@@ -194,5 +194,41 @@ describe('shared handle namespace', () => {
     expect(() => store.users.create({ handle: 'bOT', email: 'bot@example.com', passwordHash: 'hash' }))
       .toThrow(expect.objectContaining({ code: 'CONFLICT', message: 'Handle already taken', details: { field: 'handle' } }));
     expect(store.users.findByEmail('bot@example.com')).toBeNull();
+  });
+});
+
+describe('lineage storage', () => {
+  it('upgrades an existing schema idempotently and preserves existing tokens', () => {
+    db.exec('DROP INDEX tokens_issued_by; ALTER TABLE tokens DROP COLUMN issued_by_token_id; DELETE FROM schema_migrations WHERE version = 2');
+    db.prepare('INSERT INTO tokens VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)')
+      .run('old', 'oldhash', 'user', 'owner', '', '[]', null, '2027-01-01', clock().toISOString());
+    migrate(db); migrate(db);
+    expect(store.tokens.findById('old')?.issuedByTokenId).toBeNull();
+    expect(db.prepare('SELECT * FROM schema_migrations').all()).toHaveLength(2);
+    const child = store.tokens.create({ tokenHash: 'child', principalType: 'user', principalId: 'owner',
+      scopes: [], expiresAt: '2027-01-01', issuedByTokenId: 'old' });
+    db.prepare('DELETE FROM tokens WHERE id = ?').run('old');
+    expect(store.tokens.findById(child.id)?.issuedByTokenId).toBeNull();
+  });
+  it('revokes all descendants of principal tokens, even through revoked ancestors', () => {
+    const make = (hash: string, principalType: 'agent' | 'user', issuedByTokenId: string | null) =>
+      store.tokens.create({ tokenHash: hash, principalType, principalId: 'p', scopes: [],
+        expiresAt: '2027-01-01', issuedByTokenId });
+    const root = make('root', 'agent', null);
+    const child = make('child', 'user', root.id);
+    const grandchild = make('grandchild', 'user', child.id);
+    const other = make('other', 'user', null);
+    store.tokens.revoke(child.id);
+    expect(store.tokens.revokeAllForPrincipal('agent', 'p')).toBe(2);
+    for (const token of [root, child, grandchild]) {
+      expect(store.tokens.findById(token.id)?.revokedAt).not.toBeNull();
+    }
+    expect(store.tokens.findById(other.id)?.revokedAt).toBeNull();
+    expect(store.tokens.revokeAllForPrincipal('agent', 'p')).toBe(0);
+    expect(store.tokens.revokeDescendants('missing')).toBe(0);
+    const next = make('next', 'user', other.id);
+    expect(store.tokens.revokeDescendants(other.id)).toBe(1);
+    expect(store.tokens.findById(next.id)?.revokedAt).not.toBeNull();
+    expect(store.tokens.findById(other.id)?.revokedAt).toBeNull();
   });
 });
