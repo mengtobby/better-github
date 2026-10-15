@@ -116,16 +116,26 @@ async function readResponse(child: ChildProcessWithoutNullStreams, tracker: GitR
     }
     const { status, headers } = parseHeaders(buffer.subarray(0, match.index).toString('latin1'));
     const initial = buffer.subarray(match.index + match[0].length);
+    let responseAbort: () => void = () => {};
+    const detach = (): void => tracker.signal.removeEventListener('abort', responseAbort);
     const body = new ReadableStream<Uint8Array>({
-      start(controller) { if (initial.length) { tracker.output(initial.length); controller.enqueue(initial); } },
+      start(controller) {
+        responseAbort = (): void => {
+          detach();
+          if (tracker.signal.reason instanceof AppError) controller.error(tracker.signal.reason);
+        };
+        tracker.signal.addEventListener('abort', responseAbort, { once: true });
+        if (tracker.signal.aborted) responseAbort();
+        else if (initial.length) { tracker.output(initial.length); controller.enqueue(initial); }
+      },
       async pull(controller) {
         try {
           const next = await iterator.next();
-          if (next.done) { tracker.finish(); controller.close(); }
+          if (next.done) { detach(); tracker.finish(); controller.close(); }
           else { tracker.output((next.value as Buffer).length); controller.enqueue(next.value as Buffer); }
-        } catch (error) { tracker.finish(); controller.error(error instanceof AppError ? error : internal()); }
+        } catch (error) { detach(); tracker.finish(); controller.error(error instanceof AppError ? error : internal()); }
       },
-      cancel() { tracker.stop(new AppError('UNPROCESSABLE', 'Git request aborted')); },
+      cancel() { detach(); tracker.stop(new AppError('UNPROCESSABLE', 'Git request aborted')); },
     });
     if (status === 204 || status === 304) void body.cancel();
     return new Response(status === 204 || status === 304 ? null : body, { status, headers });
