@@ -21,8 +21,8 @@ export interface IssueOptions {
 }
 export interface IssuedToken { readonly token: string; readonly record: Token }
 export interface TokenService {
-  issueUserToken(userId: string, opts: IssueOptions): IssuedToken;
-  issueAgentToken(sponsorUserId: string, agentId: string, opts: IssueOptions): IssuedToken;
+  issueUserToken(userId: string, opts: IssueOptions, issuedBy: Principal | null): IssuedToken;
+  issueAgentToken(sponsorUserId: string, agentId: string, opts: IssueOptions, issuedBy: Principal): IssuedToken;
   authenticate(raw: string): Principal | null;
   revoke(tokenId: string, by: Principal): void;
 }
@@ -34,7 +34,7 @@ const idSchema = z.string().min(1);
 const digest = (raw: string): string => createHash('sha256').update(raw).digest('hex');
 
 export function createTokenService(store: Store, clock: Clock = systemClock): TokenService {
-  function issue(type: PrincipalType, id: string, input: IssueOptions): IssuedToken {
+  function issue(type: PrincipalType, id: string, input: IssueOptions, issuedBy: Principal | null): IssuedToken {
     const opts = parseInput(optionsSchema, input);
     const ttlMs = opts.ttlMs ?? (type === 'user' ? TOKEN_TTL.userDefaultMs : TOKEN_TTL.agentDefaultMs);
     const max = type === 'user' ? TOKEN_TTL.userMaxMs : TOKEN_TTL.agentMaxMs;
@@ -44,22 +44,34 @@ export function createTokenService(store: Store, clock: Clock = systemClock): To
     }
     const token = `bgh_${type === 'user' ? 'u' : 'a'}_${randomBytes(32).toString('base64url')}`;
     const record = store.tokens.create({ ...opts, tokenHash: digest(token), principalType: type,
-      principalId: id, expiresAt: new Date(clock().getTime() + ttlMs).toISOString() });
+      principalId: id, expiresAt: new Date(Math.min(clock().getTime() + ttlMs,
+        issuedBy === null ? Infinity : Date.parse(issuedBy.expiresAt))).toISOString() });
     return Object.freeze({ token, record });
   }
+  function assertIssuer(userId: string, input: IssueOptions, by: Principal, scope: Scope): void {
+    const opts = parseInput(optionsSchema, input);
+    if (by.type !== 'user' || by.id !== userId || !by.scopes.includes(scope)
+      || opts.scopes.some((requested) => !by.scopes.includes(requested))) throw forbidden();
+    const allowedRepos = by.repoIds;
+    if (allowedRepos !== null && ((opts.repoIds === null || opts.repoIds === undefined)
+      || opts.repoIds.some((id) => !allowedRepos.includes(id)))) throw forbidden();
+    if (!Number.isFinite(Date.parse(by.expiresAt)) || Date.parse(by.expiresAt) <= clock().getTime()) throw forbidden();
+  }
   return Object.freeze({
-    issueUserToken(userId: string, opts: IssueOptions): IssuedToken {
+    issueUserToken(userId: string, opts: IssueOptions, issuedBy: Principal | null): IssuedToken {
       parseInput(idSchema, userId);
+      if (issuedBy !== null) assertIssuer(userId, opts, issuedBy, 'tokens:manage');
       if (!store.users.findById(userId)) throw notFound('User');
-      return issue('user', userId, opts);
+      return issue('user', userId, opts, issuedBy);
     },
-    issueAgentToken(sponsorUserId: string, agentId: string, opts: IssueOptions): IssuedToken {
+    issueAgentToken(sponsorUserId: string, agentId: string, opts: IssueOptions, issuedBy: Principal): IssuedToken {
       parseInput(idSchema, sponsorUserId);
       parseInput(idSchema, agentId);
+      assertIssuer(sponsorUserId, opts, issuedBy, 'agents:manage');
       const agent = store.agents.findById(agentId);
       if (!agent || agent.revokedAt !== null || agent.sponsorUserId !== sponsorUserId
         || !store.users.findById(sponsorUserId)) throw forbidden();
-      return issue('agent', agentId, opts);
+      return issue('agent', agentId, opts, issuedBy);
     },
     authenticate(raw: string): Principal | null {
       if (!/^bgh_[ua]_[A-Za-z0-9_-]{43}$/.test(raw)) return null;
@@ -73,7 +85,7 @@ export function createTokenService(store: Store, clock: Clock = systemClock): To
       if (!user) return null;
       store.tokens.touch(token.id);
       return Object.freeze({ type: token.principalType, id: token.principalId,
-        handle: agent ? agent.handle : user.handle, userId: user.id, tokenId: token.id,
+        handle: agent ? agent.handle : user.handle, userId: user.id, tokenId: token.id, expiresAt: token.expiresAt,
         scopes: Object.freeze([...token.scopes]),
         repoIds: token.repoIds === null ? null : Object.freeze([...token.repoIds]) });
     },
@@ -83,7 +95,8 @@ export function createTokenService(store: Store, clock: Clock = systemClock): To
       if (!token) throw notFound('Token');
       const ownerId = token.principalType === 'user' ? token.principalId
         : store.agents.findById(token.principalId)?.sponsorUserId;
-      if (by.type !== 'user' || by.id !== ownerId) throw forbidden();
+      if (by.tokenId !== tokenId
+        && (by.type !== 'user' || by.id !== ownerId || !by.scopes.includes('tokens:manage'))) throw forbidden();
       store.tokens.revoke(tokenId);
     },
   });

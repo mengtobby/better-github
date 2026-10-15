@@ -29,7 +29,7 @@ export function createTokenRoutes(deps: { readonly store: Store; readonly tokens
       userId = user.id;
     }
     const issued = store.transaction(() => {
-      const issued = tokens.issueUserToken(userId, { scopes: input.scopes ?? ALL_SCOPES, ttlMs: input.ttlSeconds === undefined ? undefined : input.ttlSeconds * 1000, label: input.label });
+      const issued = tokens.issueUserToken(userId, { scopes: input.scopes ?? (p ? p.scopes : ALL_SCOPES), ttlMs: input.ttlSeconds === undefined ? undefined : input.ttlSeconds * 1000, label: input.label }, p ?? null);
       store.audit.append({ actorType: 'user', actorId: userId, action: 'token.create', target: issued.record.id });
       return issued;
     });

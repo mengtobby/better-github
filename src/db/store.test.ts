@@ -182,3 +182,17 @@ describe('audit repository', () => {
     expect(() => store.audit.list({ limit: -1 })).toThrow(AppError);
   });
 });
+
+describe('shared handle namespace', () => {
+  it('rejects user and agent collisions case-insensitively without inserting', () => {
+    const owner = user();
+    expect(() => store.agents.create({ handle: 'aLiCe', sponsorUserId: owner.id, displayName: 'Bot' }))
+      .toThrow(expect.objectContaining({ code: 'CONFLICT', message: 'Handle already taken', details: { field: 'handle' } }));
+    expect(store.agents.listBySponsor(owner.id)).toEqual([]);
+    const bot = store.agents.create({ handle: 'Bot', sponsorUserId: owner.id, displayName: 'Bot' });
+    store.agents.revoke(bot.id);
+    expect(() => store.users.create({ handle: 'bOT', email: 'bot@example.com', passwordHash: 'hash' }))
+      .toThrow(expect.objectContaining({ code: 'CONFLICT', message: 'Handle already taken', details: { field: 'handle' } }));
+    expect(store.users.findByEmail('bot@example.com')).toBeNull();
+  });
+});

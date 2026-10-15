@@ -42,9 +42,11 @@ beforeEach(async () => {
   root = await git(['commit-tree', tree], 'initial');
   await git(['update-ref', 'refs/heads/main', root]);
   const tokens = createTokenService(store);
-  auth = { Authorization: `Bearer ${tokens.issueUserToken(owner.id, { scopes: ['repo:write'] }).token}` };
+  auth = { Authorization: `Bearer ${tokens.issueUserToken(owner.id, { scopes: ['repo:write'] }, null).token}` };
+  const sponsor = tokens.authenticate(tokens.issueUserToken(owner.id, { scopes: ['agents:manage', 'repo:write'] }, null).token);
+  if (!sponsor) throw new Error('sponsor token failed to authenticate');
   const agent = store.agents.create({ handle: 'bot', displayName: 'Bot', sponsorUserId: owner.id });
-  excluded = { Authorization: `Bearer ${tokens.issueAgentToken(owner.id, agent.id, { scopes: ['repo:write'], repoIds: [] }).token}` };
+  excluded = { Authorization: `Bearer ${tokens.issueAgentToken(owner.id, agent.id, { scopes: ['repo:write'], repoIds: [] }, sponsor).token}` };
   app = new Hono<AppEnv>(); app.onError(createErrorHandler()); app.use('*', authMiddleware(tokens));
   app.route('/api/v1/repos', createScmRoutes({ store, storage, scm: createScm(runner) }));
 });
