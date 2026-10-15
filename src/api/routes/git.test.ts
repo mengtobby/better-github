@@ -1,3 +1,4 @@
+import * as transport from '../../git/smart-http.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -5,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { openDatabase } from '../../db/database.js';
 import type { Db } from '../../db/database.js';
 import { createStore } from '../../db/store.js';
@@ -54,7 +55,7 @@ const advertise = (name: string, service = 'git-upload-pack'): string => `/alice
 it('serves public reads, challenges anonymous private reads and pushes, and hides repos from outsiders', async () => {
   const response = await app.request(advertise('demo'));
   expect(response.status).toBe(200); await response.arrayBuffer();
-  for (const route of [advertise('secret'), advertise('demo', 'git-receive-pack'), '/alice/demo.git/git-receive-pack']) {
+  for (const route of [advertise('missing'), '/missing/demo.git/info/refs?service=git-upload-pack', advertise('secret'), advertise('demo', 'git-receive-pack'), '/alice/demo.git/git-receive-pack']) {
     const result = await app.request(route, { method: route.endsWith('/git-receive-pack') ? 'POST' : 'GET' });
     expect(result.status).toBe(401);
     expect(result.headers.get('WWW-Authenticate')).toBe('Basic realm="better-github"');
@@ -63,7 +64,7 @@ it('serves public reads, challenges anonymous private reads and pushes, and hide
     expect((await app.request(advertise('secret'), { headers: { Authorization } })).status).toBe(404);
   }
   expect((await app.request(advertise('demo'), { headers: { Authorization: excluded } })).status).toBe(403);
-  for (const route of ['/unrelated', advertise('missing'), '/missing/demo.git/info/refs?service=git-upload-pack']) {
+  for (const route of ['/unrelated']) {
     expect((await app.request(route)).status).toBe(404);
   }
 });
@@ -86,5 +87,34 @@ it('pushes and clones using real git over Basic HTTP, and audits the push', asyn
   await git(['-C', local, 'commit', '-m', 'initial']);
   await git(['-C', local, 'push', remote, 'main']);
   await git(['clone', remote, join(directory, 'clone')]);
-  expect(store.audit.list({ limit: 10 })).toContainEqual(expect.objectContaining({ action: 'git.push' }));
+  await expect.poll(() => store.audit.list({ limit: 10 })).toContainEqual(expect.objectContaining({ action: 'git.push' }));
 }, 30000);
+
+it('audits only successfully completed push processes', async () => {
+  const mock = vi.spyOn(transport, 'serveGitHttp');
+  try {
+    for (const outcome of [
+      { exitCode: 1, aborted: false, timedOut: false },
+      { exitCode: 0, aborted: true, timedOut: false },
+      { exitCode: 0, aborted: false, timedOut: true },
+      { exitCode: 0, aborted: false, timedOut: false },
+    ]) {
+      mock.mockImplementationOnce(async (_request, options) => {
+        options.onComplete?.({ ...outcome, bytesOut: 1 });
+        return new Response('ok');
+      });
+      await app.request('/alice/demo.git/git-receive-pack', { method: 'POST', headers: { Authorization: basic } });
+    }
+    expect(store.audit.list({ limit: 10 }).filter(event => event.action === 'git.push')).toHaveLength(1);
+  } finally { mock.mockRestore(); }
+});
+
+it('returns identical anonymous challenges for missing and private repositories', async () => {
+  for (const service of ['git-upload-pack', 'git-receive-pack']) {
+    const hidden = await app.request(advertise('secret', service));
+    const missing = await app.request(advertise('missing', service));
+    expect(hidden.status).toBe(401); expect(missing.status).toBe(hidden.status);
+    expect([...missing.headers]).toEqual([...hidden.headers]);
+    expect(await missing.text()).toBe(await hidden.text());
+  }
+});

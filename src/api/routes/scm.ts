@@ -9,7 +9,8 @@ import type { RepoStorage } from '../../git/storage.js';
 import { isValidName } from '../../git/names.js';
 import type { Scm } from '../../scm/scm.js';
 import { assertSafeRef, assertSafePath } from '../../scm/validate.js';
-import { ok, fail } from '../../shared/envelope.js';
+import { ok } from '../../shared/envelope.js';
+import { conflict } from '../../shared/errors.js';
 import { parseInput, parseJsonBody } from '../../shared/http.js';
 import { resolveRepo } from '../repo-lookup.js';
 
@@ -26,7 +27,7 @@ const history = reading.extend({
 });
 const merge = z.object({ target: ref, source: ref, message: z.string().min(1).max(2000),
   strategy: z.enum(['merge', 'squash', 'ff-only']).optional(),
-  expectedTargetSha: z.string().regex(/^[a-fA-F0-9]{40}$/u).optional() });
+  expectedTargetSha: z.string().regex(/^(?:[a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/u).transform(value => value.toLowerCase()).optional() });
 
 export function createScmRoutes(deps: ScmRouteDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -79,9 +80,8 @@ export function createScmRoutes(deps: ScmRouteDeps): Hono<AppEnv> {
       name: principal.handle, email: `${principal.handle}@${domain}.noreply.better-github.invalid`,
     } });
     deps.store.audit.append({ actorType: principal.type, actorId: principal.id, action: 'repo.merge', target: repo.id, metadata: { status: result.status } });
-    return result.status === 'conflict'
-      ? c.json(fail('CONFLICT', 'Merge conflicts', { conflicts: result.conflicts }), 409)
-      : c.json(ok(result));
+    if (result.status === 'conflict') throw conflict('Merge conflicts', { conflicts: result.conflicts });
+    return c.json(ok(result));
   });
   return app;
 }

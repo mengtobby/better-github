@@ -30,13 +30,15 @@ export class AppError extends Error {
   readonly code: ErrorCode;
   readonly status: number;
   readonly details: unknown;
+  readonly headers: Readonly<Record<string, string>>;
 
-  constructor(code: ErrorCode, message: string, details?: unknown) {
+  constructor(code: ErrorCode, message: string, details?: unknown, options: { readonly headers?: Record<string, string> } = {}) {
     super(message);
     this.name = 'AppError';
     this.code = code;
     this.status = ERROR_STATUS[code];
     this.details = details;
+    this.headers = Object.freeze({ ...options.headers });
   }
 }
 

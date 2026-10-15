@@ -15,3 +15,13 @@ it('restricts agent management and invalidates revoked agent tokens', async () =
     expect((await f.request('/api/v1/agents/alice-bot', 'DELETE', undefined, token)).status).toBe(404);
   } finally { await f.close(); }
 });
+
+it('reports handle collisions as conflicts in both identity routes', async () => {
+  const f = await fixture();
+  try {
+    const token = await f.signup();
+    expect((await f.request('/api/v1/agents', 'POST', { handle: 'ALICE', displayName: 'Bot' }, token)).status).toBe(409);
+    await f.request('/api/v1/agents', 'POST', { handle: 'bot', displayName: 'Bot' }, token);
+    expect((await f.request('/api/v1/users', 'POST', { handle: 'BOT', email: 'bot@example.com', password: 'a long password!' })).status).toBe(409);
+  } finally { await f.close(); }
+});

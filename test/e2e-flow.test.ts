@@ -24,6 +24,12 @@ it('an agent pushes, reads, compares and merges a private repository over HTTP',
     }
     const alice = await signup('alice'), bob = await signup('bob');
     const repo = await (await api('/repos', 'POST', { name: 'demo' }, alice)).json() as { data: { id: string } };
+    const hidden = await fetch(`${base}/alice/demo.git/info/refs?service=git-upload-pack`);
+    const missing = await fetch(`${base}/alice/missing.git/info/refs?service=git-upload-pack`);
+    expect(hidden.status).toBe(401); expect(missing.status).toBe(401);
+    expect(hidden.headers.get('WWW-Authenticate')).toBe('Basic realm="better-github"');
+    expect(missing.headers.get('WWW-Authenticate')).toBe(hidden.headers.get('WWW-Authenticate'));
+    expect(await missing.text()).toBe(await hidden.text());
     expect((await api('/agents', 'POST', { handle: 'alice-bot', displayName: 'Alice bot' }, alice)).status).toBe(201);
     const issued = await (await api('/agents/alice-bot/tokens', 'POST', { scopes: ['repo:read', 'repo:write'], repoIds: [repo.data.id] }, alice)).json() as { data: { token: string } };
     const agent = issued.data.token;
