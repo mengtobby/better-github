@@ -129,3 +129,61 @@ it('merges divergent clean histories and detects a concurrent ref update', async
   expect((await scm.getCommit(f.repo, result.sha)).parents).toEqual([left, right]);
   expect((await scm.readTree(f.repo, result.sha)).map(entry => entry.name)).toEqual(['a.txt', 'left', 'right']);
 });
+
+it('bounds large blobs and patch output and matches type-change sections by path', async () => {
+  const f = await fixture();
+  const large = await f.blob(Buffer.alloc(5 * 1024 * 1024, 120));
+  const base = await f.commit({ 'b.txt': await f.blob('original\n'), 'z.txt': await f.blob('before\n'), large }, [f.root]);
+  const reads: number[] = [];
+  const bounded = createScm({ async run(args, opts) {
+    const result = await runner.run(args, opts);
+    if (args[0] === 'cat-file' && args[1] === 'blob') reads.push(result.stdout.length);
+    return result;
+  } });
+  expect(await bounded.readBlob(f.repo, base, 'large')).toMatchObject({ truncated: true, encoding: 'utf8' });
+  expect(reads).toEqual([1024 * 1024 + 1]);
+  const link = await f.blob('destination');
+  const tree = await f.git(['mktree'], `120000 blob ${link}\tb.txt\n100644 blob ${large}\tlarge\n100644 blob ${await f.blob('after\n')}\tz.txt\n`);
+  const head = await f.git(['commit-tree', tree, '-p', base], 'type change');
+  const diff = await scm.diff(f.repo, base, head);
+  expect(diff.files[0]).toMatchObject({ newPath: 'b.txt', status: 'type-changed', additions: 1, deletions: 1 });
+  expect(diff.files[1]).toMatchObject({ newPath: 'z.txt', additions: 1, deletions: 1 });
+  expect(diff.files[1]?.hunks[0]?.lines.map(line => line.content)).toEqual(['before', 'after']);
+  for (const opts of [{ maxFiles: 0 }, { maxLines: 1 }, { maxPatchBytes: 10 }]) expect((await scm.diff(f.repo, base, head, opts)).truncated).toBe(true);
+});
+
+it('maps non-race update failures to INTERNAL and accepts uppercase expected SHAs', async () => {
+  const f = await fixture();
+  const source = await f.commit({ 'a.txt': f.a, b: await f.blob('b') }, [f.root]);
+  const failing = createScm({ async run(args, opts) {
+    if (args[0] === 'update-ref') return { stdout: Buffer.alloc(0), stderr: 'failure', exitCode: 128, truncated: false };
+    return runner.run(args, opts);
+  } });
+  const input = { target: 'main', source, message: 'merge', strategy: 'ff-only' as const, expectedTargetSha: f.root.toUpperCase(), author: { name: 'Agent', email: 'agent@example.com' } };
+  await expect(failing.merge(f.repo, input)).rejects.toMatchObject({ code: 'INTERNAL' });
+  expect(await scm.merge(f.repo, input)).toMatchObject({ status: 'merged' });
+});
+
+it('rejects unsafe blob sizes before reading content', async () => {
+  const f = await fixture();
+  const invalid = createScm({ async run(args, opts) {
+    if (args[0] === 'cat-file' && args[1] === '-s') return { stdout: Buffer.from('9007199254740992'), stderr: '', exitCode: 0, truncated: false };
+    return runner.run(args, opts);
+  } });
+  await expect(invalid.readBlob(f.repo, f.root, 'a.txt')).rejects.toMatchObject({ code: 'INTERNAL' });
+});
+
+it('requests patches only for the retained literal paths', async () => {
+  const f = await fixture();
+  const head = await f.commit({ 'a.txt': await f.blob('changed\n'), 'z.txt': await f.blob('extra\n') }, [f.root]);
+  const patchCalls: (readonly string[])[] = [];
+  const limited = createScm({ async run(args, opts) {
+    if (args.includes('--patch')) patchCalls.push(args);
+    return runner.run(args, opts);
+  } });
+  const diff = await limited.diff(f.repo, f.root, head, { maxFiles: 1 });
+  expect(diff).toMatchObject({ truncated: true, files: [expect.objectContaining({ newPath: 'a.txt' })] });
+  expect(patchCalls).toHaveLength(1);
+  expect(patchCalls[0]?.[0]).toBe('--literal-pathspecs');
+  expect(patchCalls[0]?.slice(patchCalls[0].indexOf('--') + 1)).toEqual(['a.txt']);
+});

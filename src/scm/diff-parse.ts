@@ -31,3 +31,37 @@ export function parseRaw(raw: string): readonly Pick<DiffFile, 'oldPath' | 'newP
   return result;
 }
 
+
+function decodePath(value: string): string {
+  if (!value.startsWith('"')) return value;
+  const bytes: number[] = [];
+  const escapes: Readonly<Record<string, number>> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
+  for (let i = 1; i < value.length - 1; i++) {
+    if (value[i] !== '\\') bytes.push(...Buffer.from(value[i]!));
+    else {
+      const octal = /^[0-7]{1,3}/u.exec(value.slice(i + 1));
+      if (octal) { bytes.push(parseInt(octal[0], 8)); i += octal[0].length; }
+      else { bytes.push(escapes[value[++i]!] ?? 63); }
+    }
+  }
+  return Buffer.from(bytes).toString();
+}
+function matchesHeader(header: string, file: Pick<DiffFile, 'oldPath' | 'newPath'>): boolean {
+  for (let i = 0; i < header.length; i++) {
+    if (header[i] !== ' ') continue;
+    const oldPath = decodePath(header.slice(0, i)), newPath = decodePath(header.slice(i + 1));
+    if (oldPath === `a/${file.oldPath ?? file.newPath}` && newPath === `b/${file.newPath ?? file.oldPath}`) return true;
+  }
+  return false;
+}
+export function matchPatches(raw: readonly Pick<DiffFile, 'oldPath' | 'newPath' | 'status'>[], patch: string, maxLines: number): { readonly files: readonly DiffFile[]; readonly truncated: boolean } {
+  const allLines = patch.split('\n');
+  if (allLines.at(-1) === '') allLines.pop();
+  const truncated = allLines.length > maxLines;
+  const sections = allLines.slice(0, maxLines).join('\n').split(/^diff --git /mu).slice(1);
+  const files = raw.map(file => {
+    const patches = sections.filter(section => matchesHeader(section.split('\n')[0]!, file)).map(parsePatch);
+    return { ...file, hunks: patches.flatMap(part => part.hunks), binary: patches.some(part => part.binary), additions: patches.reduce((sum, part) => sum + part.additions, 0), deletions: patches.reduce((sum, part) => sum + part.deletions, 0) };
+  });
+  return { files, truncated };
+}
